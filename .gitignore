@@ -1,0 +1,17 @@
+.DS_Store
+.idea/
+.vscode/
+
+target/
+*.class
+
+node_modules/
+dist/
+coverage/
+
+*.log
+*.h2.db
+*.mv.db
+*.trace.db
+
+backend/src/main/resources/static/
