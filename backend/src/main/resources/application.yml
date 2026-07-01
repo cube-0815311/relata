@@ -1,6 +1,10 @@
 server:
   port: 8080
 
+logging:
+  level:
+    com.relata.ai: DEBUG
+
 spring:
   application:
     name: relata
@@ -23,6 +27,13 @@ spring:
       api-key: ${DASHSCOPE_API_KEY:xxx}
 
 relata:
+  ai:
+    default-model: ${RELATA_AI_DEFAULT_MODEL:deepseek-v4-pro}
+    deepseek:
+      base-url: ${DEEPSEEK_BASE_URL:https://api.deepseek.com}
+      api-key: ${DEEPSEEK_API_KEY:}
+      flash-model: ${DEEPSEEK_FLASH_MODEL:deepseek-v4-flash}
+      pro-model: ${DEEPSEEK_PRO_MODEL:deepseek-v4-pro}
   sql:
     default-limit: 500
     query-timeout-seconds: 30
