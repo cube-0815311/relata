@@ -206,6 +206,14 @@
                 @clear="searchMetadataTables"
               />
               <el-button :icon="Search" @click="searchMetadataTables">筛选</el-button>
+              <el-button
+                type="danger"
+                plain
+                :disabled="!selectedMetadataTables.length"
+                @click="removeSelectedMetadataTables"
+              >
+                批量删除
+              </el-button>
             </div>
             <div class="metadata-table">
               <el-table
@@ -213,7 +221,9 @@
                 row-key="id"
                 v-loading="metadataLoading"
                 empty-text="暂无元数据表"
+                @selection-change="handleMetadataSelectionChange"
               >
+                <el-table-column type="selection" width="44" />
                 <el-table-column type="expand">
                   <template #default="{ row }">
                     <div class="metadata-column-table">
@@ -320,9 +330,10 @@
                 <el-table-column prop="description" label="说明" min-width="220" show-overflow-tooltip>
                   <template #default="{ row }">{{ row.description || '-' }}</template>
                 </el-table-column>
-                <el-table-column label="操作" width="120" fixed="right">
+                <el-table-column label="操作" width="180" fixed="right">
                   <template #default="{ row }">
-                    <el-button size="small" type="primary" plain @click="openRelationModel(row.id)">编辑模型</el-button>
+                    <el-button size="small" type="primary" plain @click.stop="openRelationModel(row.id)">编辑模型</el-button>
+                    <el-button size="small" type="danger" plain @click.stop="removeRelationModel(row)">删除</el-button>
                   </template>
                 </el-table-column>
               </el-table>
@@ -433,6 +444,177 @@
         </section>
       </template>
 
+      <template v-else-if="activeModule === 'AI 问数'">
+        <section class="management-content ai-ask-main">
+          <section class="ai-ask-layout">
+            <aside class="ai-ask-context">
+              <section class="context-block">
+                <div class="section-title">
+                  <span>当前模型</span>
+                  <el-tag size="small" type="success">{{ aiAskModelEntities.length }} 个实体</el-tag>
+                </div>
+                <el-select v-model="aiAskRelationModelId" filterable placeholder="选择关系模型" @change="handleAiAskModelChange">
+                  <el-option
+                    v-for="model in queryRelationModels"
+                    :key="model.id"
+                    :label="model.name"
+                    :value="model.id"
+                  />
+                </el-select>
+                <p class="context-note">{{ aiAskModelDetail?.description || selectedAiAskModel?.description || '先选择一个关系模型，AI 会基于模型实体、关系和字段能力回答问题。' }}</p>
+              </section>
+
+              <section class="context-block">
+                <div class="section-title">
+                  <span>模型理解</span>
+                  <div class="model-summary-actions">
+                    <el-tag size="small" type="info">{{ aiAskModelRelations.length }} 条关系</el-tag>
+                    <el-tooltip content="AI 解读说明" placement="top">
+                      <el-button
+                        size="small"
+                        circle
+                        :icon="MagicStick"
+                        :loading="aiAskSummaryGenerating"
+                        :disabled="!aiAskModelDetail"
+                        @click="generateAiAskModelSummary"
+                      />
+                    </el-tooltip>
+                  </div>
+                </div>
+                <div class="model-summary">
+                  <el-input
+                    v-model="aiAskModelSummary"
+                    type="textarea"
+                    :rows="5"
+                    resize="none"
+                    placeholder="选择模型后，可由 AI 解读模型关系，也可以在这里人工补充说明。"
+                  />
+                </div>
+              </section>
+
+              <section class="context-block">
+                <div class="agent-rule-editor">
+                  <div class="rule-editor-title">
+                    <span>模型提示词</span>
+                    <el-tag size="small" type="info">{{ aiAskRules.length }}</el-tag>
+                  </div>
+                  <el-input
+                    v-model="aiAskRuleDraft"
+                    type="textarea"
+                    :rows="2"
+                    resize="none"
+                    placeholder="例如：检查订单明细依赖时，必须优先确认 ORDER_ID 是否指向订单主表。"
+                    @keyup.enter.exact.prevent="submitAiAskRule"
+                  />
+                  <div class="rule-actions">
+                    <el-button size="small" type="primary" plain :disabled="!aiAskRuleDraft.trim()" @click="submitAiAskRule">
+                      {{ editingAiAskRuleId ? '保存提示词' : '添加提示词' }}
+                    </el-button>
+                    <el-button v-if="editingAiAskRuleId" size="small" text @click="cancelEditAiAskRule">取消编辑</el-button>
+                    <el-button size="small" text @click="resetAiAskRules">恢复默认</el-button>
+                  </div>
+                  <div class="rule-list">
+                    <article v-for="rule in aiAskRules" :key="rule.id" class="rule-item">
+                      <p>{{ rule.content }}</p>
+                      <div class="rule-item-actions">
+                        <el-button size="small" text @click="startEditAiAskRule(rule)">编辑</el-button>
+                        <el-button size="small" text type="danger" @click="removeAiAskRule(rule.id)">删除</el-button>
+                      </div>
+                    </article>
+                  </div>
+                </div>
+              </section>
+            </aside>
+
+            <section class="ai-chat-panel">
+              <div class="ai-chat-header">
+                <div>
+                  <h2>AI 问数</h2>
+                  <p>围绕生成的关系模型对话，Agent 会先理解模型，再识别实体并规划可执行的数据查询。</p>
+                </div>
+                <el-tag type="success" effect="plain">流式执行</el-tag>
+              </div>
+
+              <div ref="aiChatThreadRef" class="chat-thread">
+                <article v-for="message in aiAskMessages" :key="message.id" :class="['chat-message', message.role]">
+                  <div class="message-bubble">
+                    <p v-if="message.role === 'user' || (!message.toolSteps?.length && !message.result)" class="message-text">
+                      {{ message.content }}
+                    </p>
+                    <div v-if="message.entities?.length" class="message-entities">
+                      <el-tag v-for="entity in message.entities" :key="entity" size="small">{{ entity }}</el-tag>
+                    </div>
+                    <div v-if="message.toolSteps?.length" class="agent-trace">
+                      <div v-for="step in message.toolSteps" :key="step.title" class="trace-step">
+                        <Check />
+                        <div>
+                          <strong>{{ step.title }}</strong>
+                          <span>{{ step.detail }}</span>
+                        </div>
+                      </div>
+                    </div>
+                    <div v-if="message.result && (message.result.sql || message.result.tables.length)" class="mock-result">
+                      <div class="mock-result-header">
+                        <strong>{{ message.result.title }}</strong>
+                        <span>{{ message.result.summary }}</span>
+                      </div>
+                      <div class="result-table-grid">
+                        <article v-for="table in message.result.tables" :key="table.name">
+                          <strong>{{ table.name }}</strong>
+                          <span>{{ table.rows }} 行</span>
+                          <p>{{ table.fields.join(' / ') }}</p>
+                        </article>
+                      </div>
+                      <pre>{{ message.result.sql }}</pre>
+                      <el-table
+                        v-if="message.result.rows?.length"
+                        :data="message.result.rows"
+                        size="small"
+                        border
+                        max-height="220"
+                        empty-text="暂无数据"
+                      >
+                        <el-table-column
+                          v-for="column in message.result.columns"
+                          :key="column"
+                          :prop="column"
+                          :label="column"
+                          min-width="140"
+                          show-overflow-tooltip
+                        >
+                          <template #default="{ row }">{{ formatCellValue(row[column]) }}</template>
+                        </el-table-column>
+                      </el-table>
+                    </div>
+                    <section v-if="message.role === 'assistant' && message.content" class="answer-markdown">
+                      <strong class="answer-title">结论</strong>
+                      <div v-html="renderMarkdown(message.content)" />
+                    </section>
+                  </div>
+                </article>
+              </div>
+
+              <div class="ask-composer">
+                <el-input
+                  v-model="aiAskQuestion"
+                  type="textarea"
+                  :rows="2"
+                  resize="none"
+                  placeholder="例如：查一下订单 1001 的支付记录、商品明细和用户信息"
+                  @keyup.enter.exact.prevent="sendAiAskQuestion"
+                />
+                <div class="composer-actions">
+                  <span>{{ aiAskModelDetail ? `已连接模型：${aiAskModelDetail.name}` : '请选择关系模型' }}</span>
+                  <el-button type="primary" :icon="Search" :loading="aiAskLoading" :disabled="!aiAskQuestion.trim()" @click="sendAiAskQuestion">
+                    发送问题
+                  </el-button>
+                </div>
+              </div>
+            </section>
+          </section>
+        </section>
+      </template>
+
       <template v-else>
         <aside class="left-panel">
           <section class="panel-section model-entry">
@@ -487,7 +669,7 @@
                 </el-option>
               </el-select>
             </label>
-            <el-button class="analyze-button" type="primary" plain :loading="aiAnalyzing" :disabled="!aiMainTable || !modelDraft.dataSourceId" @click="analyzeMainTableRelations">
+            <el-button class="analyze-button" type="primary" plain :loading="aiAnalyzing" :disabled="!aiMainTable || !modelDraft.dataSourceId || !selectedAiModel" @click="analyzeMainTableRelations">
               分析关联关系
             </el-button>
             <div class="ai-process" v-if="aiThinkingSteps.length">
@@ -514,7 +696,7 @@
                 </div>
               </article>
             </div>
-            <p v-else class="empty-hint">输入主表后，系统会根据当前数据源已采集的表结构分析字段级关联关系。</p>
+            <p v-else class="empty-hint">输入主表并选择可用模型后，系统会根据模型返回结果生成字段级关联关系。</p>
           </section>
         </aside>
 
@@ -778,6 +960,7 @@ import {
   Connection,
   FolderChecked,
   FullScreen,
+  MagicStick,
   Plus,
   Rank,
   Refresh,
@@ -790,6 +973,7 @@ import {
   createDataSource,
   deleteDataSource,
   deleteMetadataTable,
+  deleteMetadataTables,
   fetchDataSources,
   fetchMetadataTables,
   testDataSourceConnection,
@@ -797,17 +981,27 @@ import {
 } from '../api/dataSources'
 import {
   analyzeRelationsStream,
+  chatWithAiQueryStream,
+  createModelPrompt,
+  deleteRelationModel,
+  deleteModelPrompt,
   fetchAiModels,
+  fetchAiQueryModelSummary,
+  fetchModelPrompts,
   fetchRelationModelDetail,
   fetchRelationModels,
   fetchWorkbenchOverview,
   queryAssociatedData,
-  saveRelationModel
+  resetModelPrompts,
+  saveRelationModel,
+  summarizeAiQueryModelStream,
+  updateModelPrompt
 } from '../api/workbench'
 import type {
   DataSourceForm,
   DataSourceItem,
   MetadataCollectResponse,
+  MetadataTableItem,
   MetadataTablePage,
   TableMetadata
 } from '../types/dataSource'
@@ -815,7 +1009,9 @@ import type {
   AiModelOption,
   AnalyzeProgressEvent,
   AssociatedDataResponse,
+  AiQueryChatExecutionResult,
   CandidateRelation,
+  ModelPrompt,
   RelationEdge,
   RelationModelDetail,
   RelationModelListItem,
@@ -823,6 +1019,23 @@ import type {
   TableNode,
   WorkbenchOverview
 } from '../types/workbench'
+
+type AiAskMessage = {
+  id: number
+  role: 'assistant' | 'user'
+  content: string
+  entities?: string[]
+  toolSteps?: { title: string; detail: string }[]
+  result?: {
+    title: string
+    summary: string
+    tables: { name: string; rows: number; fields: string[] }[]
+    sql: string
+    columns?: string[]
+    rows?: Record<string, unknown>[]
+    rowCount?: number
+  }
+}
 
 const overview = ref<WorkbenchOverview>()
 const localNodes = ref<TableNode[]>([])
@@ -844,6 +1057,24 @@ const queryColumnValue = ref('')
 const relationQueryLoading = ref(false)
 const relationQueryResult = ref<AssociatedDataResponse>()
 const relationQueryActivePanels = ref<string[]>([])
+const aiAskRelationModelId = ref('')
+const aiAskModelDetail = ref<RelationModelDetail>()
+const aiAskModelSummary = ref('')
+const aiAskSummaryGenerating = ref(false)
+const aiAskSummaryAbortController = ref<AbortController>()
+const aiAskQuestion = ref('')
+const aiAskLoading = ref(false)
+const aiAskChatAbortController = ref<AbortController>()
+const aiAskMessages = ref<AiAskMessage[]>([])
+const aiChatThreadRef = ref<HTMLElement>()
+const defaultAiAskRules = [
+  '依赖关系优先使用主键和外键字段，字段名相同但语义不一致时需要标记为待确认。',
+  '一对多关系应从主实体主键指向明细实体外键，不能反向作为主查询路径。',
+  '跨实体查询需要保留关系路径，便于检查每一步依赖是否可追溯。'
+]
+const aiAskRuleDraft = ref('')
+const aiAskRules = ref<ModelPrompt[]>(defaultAiAskRules.map((content, index) => ({ id: String(index + 1), content, sortOrder: index + 1 })))
+const editingAiAskRuleId = ref('')
 const modelDraft = reactive({
   id: undefined as string | undefined,
   name: '新建关系模型',
@@ -857,7 +1088,7 @@ const relationSourceTable = ref('')
 const aiMainTable = ref('')
 const aiRelationCandidates = ref<RelationEdge[]>([])
 const aiModels = ref<AiModelOption[]>([])
-const selectedAiModel = ref('heuristic')
+const selectedAiModel = ref('')
 const aiAnalyzing = ref(false)
 const aiThinkingSteps = ref<{ id: number; message: string; timestamp: number }[]>([])
 const aiAnalysisAbortController = ref<AbortController>()
@@ -886,6 +1117,7 @@ const dataSourceForm = reactive<DataSourceForm>({
 })
 const metadataResult = ref<MetadataCollectResponse>()
 const metadataTablePage = ref<MetadataTablePage>()
+const selectedMetadataTables = ref<MetadataTableItem[]>([])
 const metadataKeyword = ref('')
 const metadataPage = ref(1)
 const metadataPageSize = ref(10)
@@ -924,7 +1156,7 @@ const menuGroups = [
   },
   {
     title: 'AI 问数',
-    items: ['对话分析', 'SQL 生成记录', '常用问题模板']
+    items: []
   }
 ]
 const homeSteps = [
@@ -969,7 +1201,7 @@ const homeCards = [
     title: 'AI 问数',
     description: '围绕已确认的模型生成 SQL 和分析结果。',
     action: '查看问数模块',
-    target: '对话分析'
+    target: 'AI 问数'
   }
 ]
 
@@ -1020,12 +1252,34 @@ const queryColumnOptions = computed(() => {
   return queryTableOptions.value.find((node) => node.tableName === queryTableName.value)?.columns || []
 })
 
+const selectedAiAskModel = computed(() => {
+  return queryRelationModels.value.find((model) => model.id === aiAskRelationModelId.value)
+})
+
+const aiAskModelEntities = computed(() => {
+  return (aiAskModelDetail.value?.nodes || []).map((node) => {
+    const keyFields = node.columns
+      .filter((column) => column.badge === 'PK' || column.badge === 'FK')
+      .map((column) => column.name)
+      .slice(0, 4)
+    const fallbackFields = node.columns.slice(0, 3).map((column) => column.name)
+    return {
+      name: node.tableName,
+      comment: node.comment || '业务实体',
+      keyFields: keyFields.length ? keyFields : fallbackFields,
+      capability: buildEntityCapability(node)
+    }
+  })
+})
+
+const aiAskModelRelations = computed(() => aiAskModelDetail.value?.edges || [])
+
 const graphNodes = computed(() => {
   return activeModule.value === '关系模型' ? modelCanvasNodes.value : localNodes.value
 })
 
 const activeModule = computed(() => {
-  return menuGroups.find((group) => group.items.includes(activeSubMenu.value))?.title || '关系模型'
+  return menuGroups.find((group) => group.title === activeSubMenu.value || group.items.includes(activeSubMenu.value))?.title || '关系模型'
 })
 
 const selectedDataSourceRecord = computed(() => {
@@ -1293,6 +1547,45 @@ async function saveRelationModelDraft() {
   ElMessage.success('关系模型已保存')
 }
 
+async function removeRelationModel(row: RelationModelListItem) {
+  try {
+    await ElMessageBox.confirm(`确认删除关系模型「${row.name}」？删除后模型中的表和关系配置也会一并移除。`, '删除模型', {
+      type: 'warning',
+      confirmButtonText: '删除',
+      cancelButtonText: '取消'
+    })
+  } catch {
+    return
+  }
+  await deleteRelationModel(row.id)
+  relationModelExpandedKeys.value = relationModelExpandedKeys.value.filter((id) => id !== row.id)
+  if (modelDraft.id === row.id) {
+    modelDraft.id = undefined
+    modelDraft.name = '新建关系模型'
+    modelDraft.description = ''
+    modelCanvasNodes.value = []
+    modelCanvasEdges.value = []
+    aiRelationCandidates.value = []
+    aiThinkingSteps.value = []
+    resetManualRelationForm()
+  }
+  if (queryRelationModelId.value === row.id) {
+    queryRelationModelId.value = ''
+    queryModelDetail.value = undefined
+    queryTableName.value = ''
+    queryColumnName.value = ''
+    relationQueryResult.value = undefined
+    relationQueryActivePanels.value = []
+  }
+  if (aiAskRelationModelId.value === row.id) {
+    aiAskRelationModelId.value = ''
+    aiAskModelDetail.value = undefined
+  }
+  await loadRelationModelPage()
+  await loadQueryRelationModels()
+  ElMessage.success('关系模型已删除')
+}
+
 function handleModelDataSourceChange() {
   modelCanvasNodes.value = []
   modelCanvasEdges.value = []
@@ -1325,7 +1618,7 @@ async function analyzeMainTableRelations() {
         onProgress: appendAiThinkingStep,
         onRelation: (relation) => appendAnalyzedRelation(mainTable.name, candidateRelationToEdge(relation)),
         onResult: (result) => applyAnalyzedRelations(mainTable.name, result.relations.map(candidateRelationToEdge)),
-        onError: (message) => ElMessage.error(message)
+        onError: (message) => ElMessage.error(message || 'AI 分析失败')
       },
       aiAnalysisAbortController.value.signal
     )
@@ -1387,79 +1680,6 @@ function candidateRelationToEdge(candidate: CandidateRelation): RelationEdge {
     confidence: candidate.confidence,
     sourceType: 'AI分析',
     reason: candidate.reason,
-    confirmed: false
-  }
-}
-
-function inferMainTableRelations(mainTable: TableMetadata) {
-  const mainPrimaryKey = mainTable.columns.find((column) => column.primaryKey)?.name || 'ID'
-  const mainToken = tableRelationToken(mainTable.name)
-  const candidates: RelationEdge[] = []
-  modelSourceTables.value.forEach((table) => {
-    if (table.name === mainTable.name) {
-      return
-    }
-    table.columns.forEach((column) => {
-      if (!looksLikeReferenceColumn(column.name)) {
-        return
-      }
-      const columnToken = columnRelationToken(column.name)
-      const matched = column.foreignKey || columnToken === mainToken || columnToken.includes(mainToken) || mainToken.includes(columnToken)
-      if (!matched) {
-        return
-      }
-      candidates.push(createAiRelationEdge(
-        mainTable.name,
-        mainPrimaryKey,
-        table.name,
-        column.name,
-        column.foreignKey ? 0.92 : 0.82,
-        `${table.name}.${column.name} 指向主表 ${mainTable.name}.${mainPrimaryKey}，可作为从主表查询关联数据的路径。`
-      ))
-    })
-
-    const tablePrimaryKey = table.columns.find((column) => column.primaryKey)?.name || 'ID'
-    mainTable.columns.forEach((column) => {
-      if (!looksLikeReferenceColumn(column.name)) {
-        return
-      }
-      const columnToken = columnRelationToken(column.name)
-      const targetToken = tableRelationToken(table.name)
-      const matched = column.foreignKey || columnToken === targetToken || columnToken.includes(targetToken) || targetToken.includes(columnToken)
-      if (!matched) {
-        return
-      }
-      candidates.push(createAiRelationEdge(
-        table.name,
-        tablePrimaryKey,
-        mainTable.name,
-        column.name,
-        column.foreignKey ? 0.9 : 0.78,
-        `${mainTable.name}.${column.name} 指向 ${table.name}.${tablePrimaryKey}，可作为主表依赖上游实体的查询路径。`
-      ))
-    })
-  })
-  return dedupeRelations(candidates).sort((left, right) => right.confidence - left.confidence)
-}
-
-function createAiRelationEdge(
-  source: string,
-  sourceColumn: string,
-  target: string,
-  targetColumn: string,
-  confidence: number,
-  reason: string
-): RelationEdge {
-  return {
-    source,
-    target,
-    sourceColumn,
-    targetColumn,
-    label: `${source}.${sourceColumn} -> ${target}.${targetColumn}`,
-    relationType: 'AI_INFERRED',
-    confidence,
-    sourceType: 'AI分析',
-    reason,
     confirmed: false
   }
 }
@@ -1560,26 +1780,6 @@ function dedupeRelations(edges: RelationEdge[]) {
     seen.add(edge.label)
     return true
   })
-}
-
-function tableRelationToken(value: string) {
-  return normalizeRelationToken(value)
-    .replace(/INFO$/i, '')
-    .replace(/RECORD$/i, '')
-    .replace(/DETAIL$/i, '')
-    .replace(/ITEM$/i, '')
-}
-
-function columnRelationToken(value: string) {
-  return normalizeRelationToken(value.replace(/_?ID$/i, ''))
-}
-
-function normalizeRelationToken(value: string) {
-  return value.replace(/_/g, '').toUpperCase()
-}
-
-function looksLikeReferenceColumn(value: string) {
-  return /(^ID$|_ID$)/i.test(value)
 }
 
 function startTableDrag(event: DragEvent, tableName: string) {
@@ -1949,7 +2149,7 @@ function columnPriority(column: TableNode['columns'][number]) {
 function selectModule(title: string) {
   const group = menuGroups.find((item) => item.title === title)
   if (group) {
-    activeSubMenu.value = group.items[0]
+    activeSubMenu.value = group.items[0] || group.title
   }
 }
 
@@ -1982,6 +2182,64 @@ function formatCellValue(value: unknown) {
     return JSON.stringify(value)
   }
   return String(value)
+}
+
+function renderMarkdown(value: string) {
+  const lines = escapeHtml(value).split(/\n/)
+  const html: string[] = []
+  let inList = false
+  lines.forEach((line) => {
+    const trimmed = line.trim()
+    if (!trimmed) {
+      if (inList) {
+        html.push('</ul>')
+        inList = false
+      }
+      return
+    }
+    const heading = /^(#{1,3})\s+(.+)$/.exec(trimmed)
+    if (heading) {
+      if (inList) {
+        html.push('</ul>')
+        inList = false
+      }
+      html.push(`<h${heading[1].length}>${renderInlineMarkdown(heading[2])}</h${heading[1].length}>`)
+      return
+    }
+    const listItem = /^[-*]\s+(.+)$/.exec(trimmed)
+    if (listItem) {
+      if (!inList) {
+        html.push('<ul>')
+        inList = true
+      }
+      html.push(`<li>${renderInlineMarkdown(listItem[1])}</li>`)
+      return
+    }
+    if (inList) {
+      html.push('</ul>')
+      inList = false
+    }
+    html.push(`<p>${renderInlineMarkdown(trimmed)}</p>`)
+  })
+  if (inList) {
+    html.push('</ul>')
+  }
+  return html.join('')
+}
+
+function renderInlineMarkdown(value: string) {
+  return value
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+}
+
+function escapeHtml(value: string) {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
 }
 
 function resetDataSourceForm() {
@@ -2051,6 +2309,10 @@ async function loadQueryRelationModels() {
     queryRelationModelId.value = queryRelationModels.value[0].id
     await handleQueryModelChange()
   }
+  if (!aiAskRelationModelId.value && queryRelationModels.value.length) {
+    aiAskRelationModelId.value = queryRelationModels.value[0].id
+    await handleAiAskModelChange()
+  }
 }
 
 async function handleQueryModelChange() {
@@ -2071,6 +2333,352 @@ function handleQueryTableChange() {
   relationQueryResult.value = undefined
   relationQueryActivePanels.value = []
   queryColumnName.value = queryColumnOptions.value.find((column) => column.badge === 'PK')?.name || queryColumnOptions.value[0]?.name || ''
+}
+
+async function handleAiAskModelChange() {
+  aiAskSummaryAbortController.value?.abort()
+  if (!aiAskRelationModelId.value) {
+    aiAskModelDetail.value = undefined
+    aiAskModelSummary.value = ''
+    aiAskRules.value = []
+    return
+  }
+  aiAskModelDetail.value = await fetchRelationModelDetail(aiAskRelationModelId.value)
+  aiAskRules.value = await fetchModelPrompts(aiAskRelationModelId.value)
+  const summary = await fetchAiQueryModelSummary(aiAskRelationModelId.value)
+  aiAskModelSummary.value = summary.summary || buildAiAskModelSummary()
+}
+
+function buildAiAskModelSummary() {
+  if (!aiAskModelEntities.value.length) {
+    return '暂无可用模型实体。可以先在关系模型中创建模型、拖入表资源并配置关系，AI 问数会基于这些实体关系理解用户问题。'
+  }
+  const relationCount = aiAskModelRelations.value.length
+  const centralEntity = findCentralAiAskEntity()
+  const connectedEntities = aiAskModelRelations.value
+    .filter((edge) => edge.source === centralEntity || edge.target === centralEntity)
+    .map((edge) => edge.source === centralEntity ? edge.target : edge.source)
+    .filter((name, index, list) => list.indexOf(name) === index)
+    .slice(0, 4)
+  if (!relationCount) {
+    return `当前模型包含 ${aiAskModelEntities.value.length} 个实体，AI 可以根据用户问题识别表和字段，并生成单实体查询计划；配置实体关系后，可继续扩展为跨表关联问数。`
+  }
+  const connectedText = connectedEntities.length ? `，并关联 ${connectedEntities.join('、')} 等数据` : ''
+  return `当前模型以 ${centralEntity} 等业务实体为基础，已沉淀 ${relationCount} 条实体关系。AI 会先识别用户问题中的业务对象，再沿模型关系规划可查询路径${connectedText}，最终交给数据查询工具执行。`
+}
+
+function buildEntityCapability(node: TableNode) {
+  const pk = node.columns.find((column) => column.badge === 'PK')?.name
+  const fkCount = node.columns.filter((column) => column.badge === 'FK').length
+  if (pk && fkCount) {
+    return `可按 ${pk} 定位主记录，并沿 ${fkCount} 个外键字段查询上下游数据。`
+  }
+  if (pk) {
+    return `可按 ${pk} 精确查询，也可作为其他实体的关联入口。`
+  }
+  return '可参与关联查询，适合按业务字段进行筛选和补充展示。'
+}
+
+function findCentralAiAskEntity() {
+  const scores = new Map(aiAskModelEntities.value.map((entity) => [entity.name, 0]))
+  aiAskModelRelations.value.forEach((edge) => {
+    scores.set(edge.source, (scores.get(edge.source) || 0) + 1)
+    scores.set(edge.target, (scores.get(edge.target) || 0) + 1)
+  })
+  return [...scores.entries()].sort((left, right) => right[1] - left[1])[0]?.[0] || aiAskModelEntities.value[0]?.name || '核心实体'
+}
+
+async function generateAiAskModelSummary() {
+  if (!aiAskModelDetail.value) {
+    ElMessage.warning('请先选择关系模型')
+    return
+  }
+  aiAskSummaryAbortController.value?.abort()
+  aiAskSummaryAbortController.value = new AbortController()
+  aiAskSummaryGenerating.value = true
+  const currentSummary = aiAskModelSummary.value
+  aiAskModelSummary.value = ''
+  try {
+    await summarizeAiQueryModelStream(
+      aiAskRelationModelId.value,
+      currentSummary,
+      {
+        onDelta: (delta) => {
+          aiAskModelSummary.value += delta
+        },
+        onComplete: (result) => {
+          aiAskModelSummary.value = result.summary || aiAskModelSummary.value || buildAiAskModelSummary()
+        },
+        onError: (message) => ElMessage.error(message)
+      },
+      aiAskSummaryAbortController.value.signal
+    )
+    ElMessage.success('已生成模型解读说明')
+  } catch (error) {
+    if ((error as Error).name !== 'AbortError') {
+      aiAskModelSummary.value = currentSummary || buildAiAskModelSummary()
+      ElMessage.error((error as Error).message || '模型解读失败')
+    }
+  } finally {
+    aiAskSummaryGenerating.value = false
+    aiAskSummaryAbortController.value = undefined
+  }
+}
+
+async function submitAiAskRule() {
+  if (editingAiAskRuleId.value) {
+    await updateAiAskRule()
+  } else {
+    await addAiAskRule()
+  }
+}
+
+async function addAiAskRule() {
+  const content = aiAskRuleDraft.value.trim()
+  if (!content) {
+    return
+  }
+  if (!aiAskRelationModelId.value) {
+    ElMessage.warning('请先选择关系模型')
+    return
+  }
+  if (aiAskRules.value.some((rule) => rule.content === content)) {
+    ElMessage.warning('提示词已存在')
+    return
+  }
+  const saved = await createModelPrompt(aiAskRelationModelId.value, content)
+  aiAskRules.value.push(saved)
+  aiAskRuleDraft.value = ''
+}
+
+async function updateAiAskRule() {
+  const content = aiAskRuleDraft.value.trim()
+  if (!content || !aiAskRelationModelId.value || !editingAiAskRuleId.value) {
+    return
+  }
+  const saved = await updateModelPrompt(aiAskRelationModelId.value, editingAiAskRuleId.value, content)
+  aiAskRules.value = aiAskRules.value.map((rule) => rule.id === saved.id ? saved : rule)
+  aiAskRuleDraft.value = ''
+  editingAiAskRuleId.value = ''
+}
+
+function startEditAiAskRule(rule: ModelPrompt) {
+  editingAiAskRuleId.value = rule.id
+  aiAskRuleDraft.value = rule.content
+}
+
+function cancelEditAiAskRule() {
+  editingAiAskRuleId.value = ''
+  aiAskRuleDraft.value = ''
+}
+
+async function removeAiAskRule(id: string) {
+  if (!aiAskRelationModelId.value) {
+    return
+  }
+  await deleteModelPrompt(aiAskRelationModelId.value, id)
+  aiAskRules.value = aiAskRules.value.filter((rule) => rule.id !== id)
+  if (editingAiAskRuleId.value === id) {
+    cancelEditAiAskRule()
+  }
+}
+
+async function resetAiAskRules() {
+  if (!aiAskRelationModelId.value) {
+    ElMessage.warning('请先选择关系模型')
+    return
+  }
+  aiAskRules.value = await resetModelPrompts(aiAskRelationModelId.value)
+  aiAskRuleDraft.value = ''
+  editingAiAskRuleId.value = ''
+}
+
+async function sendAiAskQuestion() {
+  const question = aiAskQuestion.value.trim()
+  if (!question) {
+    return
+  }
+  if (!aiAskRelationModelId.value) {
+    ElMessage.warning('请先选择关系模型')
+    return
+  }
+  const userMessage: AiAskMessage = {
+    id: Date.now(),
+    role: 'user',
+    content: question,
+    entities: recognizeQuestionEntities(question)
+  }
+  aiAskMessages.value.push(userMessage)
+  aiAskQuestion.value = ''
+  aiAskLoading.value = true
+  aiAskChatAbortController.value?.abort()
+  aiAskChatAbortController.value = new AbortController()
+  const assistantMessageId = Date.now() + 1
+  const assistantMessage: AiAskMessage = {
+    id: assistantMessageId,
+    role: 'assistant',
+    content: '',
+    entities: [],
+    toolSteps: [],
+    result: {
+      title: '查询执行结果',
+      summary: `问题：${question}`,
+      tables: [],
+      sql: '',
+      columns: [],
+      rows: [],
+      rowCount: 0
+    }
+  }
+  aiAskMessages.value.push(assistantMessage)
+  scrollAiChatToBottom()
+  try {
+    await chatWithAiQueryStream(
+      {
+        modelId: aiAskRelationModelId.value,
+        question,
+        limit: 100
+      },
+      {
+        onStep: (step) => {
+          updateAiAskMessage(assistantMessageId, (message) => {
+            message.toolSteps = [...(message.toolSteps || []), step]
+          })
+        },
+        onSql: (sql) => {
+          updateAiAskMessage(assistantMessageId, (message) => {
+            message.result = ensureAiAskResult(message, question)
+            message.result.sql = sql
+          })
+        },
+        onResult: (result) => applyAiQueryExecutionResult(assistantMessageId, question, result),
+        onAnswerDelta: (delta) => {
+          updateAiAskMessage(assistantMessageId, (message) => {
+            message.content += delta
+          })
+        },
+        onComplete: (result) => {
+          updateAiAskMessage(assistantMessageId, (message) => {
+            message.content = result.answer || message.content
+            message.entities = result.entities
+            if (result.sql || result.columns.length || result.rows.length) {
+              message.result = ensureAiAskResult(message, question)
+              message.result.sql = result.sql
+              message.result.columns = result.columns
+              message.result.rows = result.rows
+              message.result.rowCount = result.rowCount
+              message.result.tables = [
+                {
+                  name: aiAskModelDetail.value?.name || '查询结果',
+                  rows: result.rowCount,
+                  fields: result.columns
+                }
+              ]
+            } else {
+              message.result = undefined
+            }
+          })
+        },
+        onError: (message) => {
+          updateAiAskMessage(assistantMessageId, (item) => {
+            item.content = message
+          })
+          ElMessage.error(message)
+        }
+      },
+      aiAskChatAbortController.value.signal
+    )
+  } catch (error) {
+    if ((error as Error).name !== 'AbortError') {
+      const message = (error as Error).message || 'AI 问数失败'
+      updateAiAskMessage(assistantMessageId, (item) => {
+        item.content = message
+      })
+      ElMessage.error(message)
+    }
+  } finally {
+    aiAskLoading.value = false
+    aiAskChatAbortController.value = undefined
+  }
+}
+
+function updateAiAskMessage(messageId: number, updater: (message: AiAskMessage) => void) {
+  aiAskMessages.value = aiAskMessages.value.map((message) => {
+    if (message.id !== messageId) {
+      return message
+    }
+    const next: AiAskMessage = {
+      ...message,
+      entities: message.entities ? [...message.entities] : undefined,
+      toolSteps: message.toolSteps ? message.toolSteps.map((step) => ({ ...step })) : undefined,
+      result: message.result
+        ? {
+            ...message.result,
+            tables: message.result.tables.map((table) => ({ ...table, fields: [...table.fields] })),
+            columns: message.result.columns ? [...message.result.columns] : undefined,
+            rows: message.result.rows ? [...message.result.rows] : undefined
+          }
+        : undefined
+    }
+    updater(next)
+    return next
+  })
+  scrollAiChatToBottom()
+}
+
+function ensureAiAskResult(message: AiAskMessage, question: string) {
+  if (!message.result) {
+    message.result = {
+      title: '查询执行结果',
+      summary: `问题：${question}`,
+      tables: [],
+      sql: '',
+      columns: [],
+      rows: [],
+      rowCount: 0
+    }
+  }
+  return message.result
+}
+
+function applyAiQueryExecutionResult(messageId: number, question: string, result: AiQueryChatExecutionResult) {
+  updateAiAskMessage(messageId, (message) => {
+    message.result = ensureAiAskResult(message, question)
+    message.result.columns = result.columns
+    message.result.rows = result.rows
+    message.result.rowCount = result.rowCount
+    message.result.tables = [
+      {
+        name: aiAskModelDetail.value?.name || '查询结果',
+        rows: result.rowCount,
+        fields: result.columns
+      }
+    ]
+  })
+}
+
+function scrollAiChatToBottom() {
+  nextTick(() => {
+    const target = aiChatThreadRef.value
+    if (target) {
+      target.scrollTop = target.scrollHeight
+    }
+  })
+}
+
+function recognizeQuestionEntities(question: string) {
+  const normalizedQuestion = question.toLowerCase()
+  const matched = aiAskModelEntities.value
+    .filter((entity) => {
+      return normalizedQuestion.includes(entity.name.toLowerCase())
+        || normalizedQuestion.includes(entity.comment.toLowerCase())
+        || entity.keyFields.some((field) => normalizedQuestion.includes(field.toLowerCase()))
+    })
+    .map((entity) => entity.name)
+  if (matched.length) {
+    return matched
+  }
+  return aiAskModelEntities.value.slice(0, 2).map((entity) => entity.name)
 }
 
 async function runRelationDataQuery() {
@@ -2124,10 +2732,12 @@ function searchRelationModels() {
 async function loadMetadataTablePage() {
   if (!selectedDataSourceId.value) {
     metadataTablePage.value = undefined
+    selectedMetadataTables.value = []
     return
   }
   metadataLoading.value = true
   try {
+    selectedMetadataTables.value = []
     metadataTablePage.value = await fetchMetadataTables(selectedDataSourceId.value, {
       keyword: metadataKeyword.value.trim(),
       page: metadataPage.value,
@@ -2145,6 +2755,10 @@ async function loadMetadataTablePage() {
 function searchMetadataTables() {
   metadataPage.value = 1
   loadMetadataTablePage().catch(() => undefined)
+}
+
+function handleMetadataSelectionChange(rows: MetadataTableItem[]) {
+  selectedMetadataTables.value = rows
 }
 
 async function submitDataSource() {
@@ -2218,8 +2832,33 @@ async function removeMetadataTable(tableId: string, tableName: string) {
   await loadMetadataTablePage()
 }
 
+async function removeSelectedMetadataTables() {
+  if (!selectedDataSourceId.value || !selectedMetadataTables.value.length) {
+    return
+  }
+  const selectedCount = selectedMetadataTables.value.length
+  try {
+    await ElMessageBox.confirm(`确认删除选中的 ${selectedCount} 张元数据表？删除后这些表的字段也会一并移除。`, '批量删除表', {
+      type: 'warning',
+      confirmButtonText: '删除',
+      cancelButtonText: '取消'
+    })
+  } catch {
+    return
+  }
+  await deleteMetadataTables(
+    selectedDataSourceId.value,
+    selectedMetadataTables.value.map((table) => table.id)
+  )
+  ElMessage.success(`已删除 ${selectedCount} 张元数据表`)
+  selectedMetadataTables.value = []
+  await loadDataSources()
+  await loadMetadataTablePage()
+}
+
 watch(selectedDataSourceId, () => {
   metadataPage.value = 1
+  selectedMetadataTables.value = []
   loadMetadataTablePage().catch(() => undefined)
 })
 
@@ -2253,10 +2892,10 @@ onMounted(async () => {
     aiModels.value = modelResult.models
     selectedAiModel.value = aiModels.value.find((model) => model.id === modelResult.defaultModel && model.enabled)?.id
       || aiModels.value.find((model) => model.enabled)?.id
-      || 'heuristic'
+      || ''
   } catch {
-    aiModels.value = [{ id: 'heuristic', name: '本地规则分析', provider: 'LOCAL', enabled: true, description: '' }]
-    selectedAiModel.value = 'heuristic'
+    aiModels.value = []
+    selectedAiModel.value = ''
   }
   modelDraft.dataSourceId = dataSources.value[0]?.id
   await nextTick()
@@ -2264,6 +2903,8 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  aiAskSummaryAbortController.value?.abort()
+  aiAskChatAbortController.value?.abort()
   document.removeEventListener('fullscreenchange', syncCanvasFullscreenState)
 })
 </script>

@@ -230,6 +230,42 @@ public class DataSourceController {
         jdbcTemplate.update("delete from table_metadata where data_source_id = ? and id = ?", record.id(), tableId);
     }
 
+    @PostMapping("/{id}/metadata/tables/delete")
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    public void deleteMetadataTables(@PathVariable long id, @Valid @RequestBody DeleteMetadataTablesRequest request) {
+        DataSourceRecord record = findRecord(id);
+        List<String> tableIds = request.tableIds().stream()
+                .filter(tableId -> tableId != null && !tableId.isBlank())
+                .distinct()
+                .toList();
+        if (tableIds.isEmpty()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "请选择要删除的元数据表");
+        }
+        String placeholders = String.join(",", java.util.Collections.nCopies(tableIds.size(), "?"));
+        List<Object> params = new ArrayList<>();
+        params.add(record.id());
+        params.addAll(tableIds);
+        Integer count = jdbcTemplate.queryForObject(
+                "select count(*) from table_metadata where data_source_id = ? and id in (" + placeholders + ")",
+                Integer.class,
+                params.toArray()
+        );
+        if (count == null || count != tableIds.size()) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "部分元数据表不存在或不属于当前数据源");
+        }
+        jdbcTemplate.update(
+                "delete from column_metadata where table_metadata_id in (" + placeholders + ")",
+                tableIds.toArray()
+        );
+        params = new ArrayList<>();
+        params.add(record.id());
+        params.addAll(tableIds);
+        jdbcTemplate.update(
+                "delete from table_metadata where data_source_id = ? and id in (" + placeholders + ")",
+                params.toArray()
+        );
+    }
+
     private long nextDataSourceId() {
         return jdbcTemplate.queryForList("select id from data_source", String.class).stream()
                 .map(DataSourceController::parseLongOrNull)
@@ -600,6 +636,12 @@ public class DataSourceController {
     }
 
     public record ColumnMetadata(String name, String type, boolean primaryKey, boolean foreignKey, String comment) {
+    }
+
+    public record DeleteMetadataTablesRequest(List<String> tableIds) {
+        public DeleteMetadataTablesRequest {
+            tableIds = tableIds == null ? List.of() : tableIds;
+        }
     }
 
     private record DataSourceRecord(

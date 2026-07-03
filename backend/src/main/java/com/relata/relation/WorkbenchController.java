@@ -9,6 +9,7 @@ import jakarta.validation.constraints.NotBlank;
 
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -231,6 +232,26 @@ public class WorkbenchController {
         }
 
         return toDetail(findRelationModel(id));
+    }
+
+    @DeleteMapping("/relation-models/{id}")
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    public void deleteRelationModel(@PathVariable String id) {
+        findRelationModel(id);
+        jdbcTemplate.update("""
+                        delete from sync_task
+                        where relation_query_record_id in (
+                            select id from relation_query_record where relation_model_id = ?
+                        )
+                        """,
+                id
+        );
+        jdbcTemplate.update("delete from relation_query_record where relation_model_id = ?", id);
+        jdbcTemplate.update("delete from ai_model_prompt where relation_model_id = ?", id);
+        jdbcTemplate.update("delete from ai_model_summary where relation_model_id = ?", id);
+        jdbcTemplate.update("delete from relation_model_edge where relation_model_id = ?", id);
+        jdbcTemplate.update("delete from relation_model_node where relation_model_id = ?", id);
+        jdbcTemplate.update("delete from relation_model where id = ?", id);
     }
 
     public record WorkbenchOverview(

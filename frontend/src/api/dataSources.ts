@@ -44,3 +44,7 @@ export async function fetchMetadataTables(id: number, params: { keyword?: string
 export async function deleteMetadataTable(dataSourceId: number, tableId: string) {
   await http.delete(`/api/data-sources/${dataSourceId}/metadata/tables/${tableId}`)
 }
+
+export async function deleteMetadataTables(dataSourceId: number, tableIds: string[]) {
+  await http.post(`/api/data-sources/${dataSourceId}/metadata/tables/delete`, { tableIds })
+}

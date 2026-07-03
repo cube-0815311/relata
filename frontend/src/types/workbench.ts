@@ -141,3 +141,48 @@ export interface QueryTableResult {
 export interface AssociatedDataResponse {
   tables: QueryTableResult[]
 }
+
+export interface ModelPrompt {
+  id: string
+  content: string
+  sortOrder: number
+}
+
+export interface ModelSummaryResponse {
+  summary: string
+  provider: string
+}
+
+export interface AiQueryChatRequest {
+  modelId: string
+  question: string
+  sessionId?: string
+  limit?: number
+}
+
+export interface AiQueryChatResponse {
+  answer: string
+  steps: string[]
+  sql: string
+  columns: string[]
+  rows: Record<string, unknown>[]
+  rowCount: number
+  entities: string[]
+  notes: string[]
+  prompts: ModelPrompt[]
+}
+
+export interface AiQueryChatStep {
+  title: string
+  detail: string
+}
+
+export interface AiQueryChatSql {
+  sql: string
+}
+
+export interface AiQueryChatExecutionResult {
+  columns: string[]
+  rows: Record<string, unknown>[]
+  rowCount: number
+}

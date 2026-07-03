@@ -61,7 +61,7 @@ public class AiRelationController {
     public AiRelationController(
             JdbcTemplate jdbcTemplate,
             ObjectMapper objectMapper,
-            @Value("${relata.ai.default-model:heuristic}") String defaultModel,
+            @Value("${relata.ai.default-model:deepseek-v4-pro}") String defaultModel,
             @Value("${relata.ai.deepseek.base-url:https://api.deepseek.com}") String deepSeekBaseUrl,
             @Value("${relata.ai.deepseek.api-key:}") String deepSeekApiKey,
             @Value("${relata.ai.deepseek.flash-model:deepseek-v4-flash}") String deepSeekFlashModel,
@@ -84,8 +84,6 @@ public class AiRelationController {
     public AiModelsResponse models() {
         boolean deepSeekConfigured = hasText(deepSeekApiKey);
         return new AiModelsResponse(defaultModel, List.of(
-                new AiModelOption("heuristic", "本地规则分析", "LOCAL", true,
-                        "不依赖外部模型，基于主键、外键、字段命名和注释推断关系。"),
                 new AiModelOption("deepseek-v4-pro", "DeepSeek V4 Pro", "DEEPSEEK", deepSeekConfigured,
                         deepSeekConfigured ? "使用 DeepSeek V4 Pro 分析已采集元数据。" : "需要配置 DEEPSEEK_API_KEY 后启用。"),
                 new AiModelOption("deepseek-v4-flash", "DeepSeek V4 Flash", "DEEPSEEK", deepSeekConfigured,
@@ -118,14 +116,10 @@ public class AiRelationController {
         boolean useDeepSeek = shouldUseDeepSeek(model);
         log.info("AI relation analysis model resolved: requestedModel={}, resolvedModel={}, provider={}, deepSeekConfigured={}",
                 request.model(), model, useDeepSeek ? "DEEPSEEK" : "LOCAL", hasText(deepSeekApiKey));
-        List<CandidateRelation> relations = shouldUseDeepSeek(model)
-                ? analyzeWithDeepSeek(model, mainTable, tables)
-                : inferRelations(mainTable, tables);
-        if (relations.isEmpty() && shouldUseDeepSeek(model)) {
-            log.warn("DeepSeek returned no usable relation candidates, falling back to local inference: dataSourceId={}, mainTable={}, model={}",
-                    request.dataSourceId(), request.mainTable(), model);
-            relations = inferRelations(mainTable, tables);
+        if (!useDeepSeek) {
+            throw new ResponseStatusException(BAD_REQUEST, "请选择已启用的模型，并确认已配置 DEEPSEEK_API_KEY");
         }
+        List<CandidateRelation> relations = analyzeWithDeepSeek(model, mainTable, tables);
         relations = enforceDirectedAcyclicRelations(mainTable.name(), relations);
         log.info("AI relation analysis completed: dataSourceId={}, mainTable={}, model={}, relationCount={}",
                 request.dataSourceId(), request.mainTable(), model, relations.size());
@@ -167,20 +161,14 @@ public class AiRelationController {
 
             String model = hasText(request.model()) ? request.model() : defaultModel;
             boolean useDeepSeek = shouldUseDeepSeek(model);
-            emitProgress(emitter, "已选择模型 " + model + "，分析模式：" + (useDeepSeek ? "DeepSeek" : "本地规则") + "。");
+            emitProgress(emitter, "已选择模型 " + model + "，分析模式：DeepSeek。");
             log.info("Streaming AI relation analysis model resolved: requestedModel={}, resolvedModel={}, provider={}, deepSeekConfigured={}",
                     request.model(), model, useDeepSeek ? "DEEPSEEK" : "LOCAL", hasText(deepSeekApiKey));
-
-            List<CandidateRelation> relations;
-            if (useDeepSeek) {
-                relations = analyzeWithDeepSeekStream(model, mainTable, tables, emitter);
-                if (relations.isEmpty()) {
-                    emitProgress(emitter, "AI 没有返回可用候选关系，正在切换到本地规则兜底。");
-                    relations = inferRelations(mainTable, tables, emitter);
-                }
-            } else {
-                relations = inferRelations(mainTable, tables, emitter);
+            if (!useDeepSeek) {
+                throw new ResponseStatusException(BAD_REQUEST, "请选择已启用的模型，并确认已配置 DEEPSEEK_API_KEY");
             }
+
+            List<CandidateRelation> relations = analyzeWithDeepSeekStream(model, mainTable, tables, emitter);
 
             emitProgress(emitter, "分析完成，共识别 " + relations.size() + " 条候选关系。");
             emitter.send(SseEmitter.event()
@@ -252,13 +240,13 @@ public class AiRelationController {
         } catch (RestClientResponseException ex) {
             log.error("DeepSeek relation analysis HTTP error: status={}, responseBody={}",
                     ex.getStatusCode(), abbreviate(ex.getResponseBodyAsString(), 2000), ex);
-            emitProgress(emitter, "DeepSeek 调用失败：" + ex.getStatusCode() + "，正在使用本地规则兜底。");
-            return inferRelations(mainTable, tables, emitter);
+            emitProgress(emitter, "DeepSeek 调用失败：" + ex.getStatusCode() + "，已停止分析。");
+            throw new ResponseStatusException(BAD_REQUEST, "DeepSeek 调用失败：" + ex.getStatusCode(), ex);
         } catch (RuntimeException ex) {
-            log.error("DeepSeek relation analysis failed, falling back to local inference: logicalModel={}, mainTable={}",
+            log.error("DeepSeek relation analysis failed: logicalModel={}, mainTable={}",
                     model, mainTable.name(), ex);
-            emitProgress(emitter, "DeepSeek 调用异常，正在使用本地规则兜底。");
-            return inferRelations(mainTable, tables, emitter);
+            emitProgress(emitter, "DeepSeek 调用异常，已停止分析。");
+            throw ex;
         }
     }
 
@@ -300,8 +288,8 @@ public class AiRelationController {
                 String responseBody = new String(response.body().readAllBytes(), StandardCharsets.UTF_8);
                 log.error("DeepSeek streaming relation analysis HTTP error: status={}, responseBody={}",
                         response.statusCode(), abbreviate(responseBody, 2000));
-                emitProgress(emitter, "DeepSeek 流式调用失败：" + response.statusCode() + "，正在使用本地规则兜底。");
-                return inferRelations(mainTable, tables, emitter);
+                emitProgress(emitter, "DeepSeek 流式调用失败：" + response.statusCode() + "，已停止分析。");
+                throw new ResponseStatusException(BAD_REQUEST, "DeepSeek 流式调用失败：" + response.statusCode());
             }
 
             Set<String> tableNames = tables.stream().map(TableMetadata::name).collect(Collectors.toSet());
@@ -349,10 +337,10 @@ public class AiRelationController {
                     modelName, relations.size(), content.length());
             return relations;
         } catch (Exception ex) {
-            log.error("DeepSeek streaming relation analysis failed, falling back to local inference: logicalModel={}, mainTable={}",
+            log.error("DeepSeek streaming relation analysis failed: logicalModel={}, mainTable={}",
                     model, mainTable.name(), ex);
-            emitProgress(emitter, "DeepSeek 流式调用异常，正在使用本地规则兜底。");
-            return inferRelations(mainTable, tables, emitter);
+            emitProgress(emitter, "DeepSeek 流式调用异常，已停止分析。");
+            throw new ResponseStatusException(BAD_REQUEST, "DeepSeek 流式调用异常：" + errorMessage(ex), ex);
         }
     }
 
@@ -506,77 +494,6 @@ public class AiRelationController {
             return trimmed.substring(start, end + 1);
         }
         return trimmed;
-    }
-
-    private List<CandidateRelation> inferRelations(TableMetadata mainTable, List<TableMetadata> tables) {
-        return inferRelations(mainTable, tables, null);
-    }
-
-    private List<CandidateRelation> inferRelations(TableMetadata mainTable, List<TableMetadata> tables, SseEmitter emitter) {
-        emitProgress(emitter, "正在根据主键、外键、字段命名和表名相似度推断关系。");
-        log.info("Running local relation inference: mainTable={}, tableCount={}", mainTable.name(), tables.size());
-        String mainPrimaryKey = mainTable.columns().stream()
-                .filter(ColumnMetadata::primaryKey)
-                .map(ColumnMetadata::name)
-                .findFirst()
-                .orElse("ID");
-        String mainToken = tableRelationToken(mainTable.name());
-        List<CandidateRelation> candidates = new ArrayList<>();
-        for (TableMetadata table : tables) {
-            if (table.name().equalsIgnoreCase(mainTable.name())) {
-                continue;
-            }
-            for (ColumnMetadata column : table.columns()) {
-                if (!looksLikeReferenceColumn(column.name())) {
-                    continue;
-                }
-                String columnToken = columnRelationToken(column.name());
-                if (column.foreignKey() || tokenMatches(columnToken, mainToken)) {
-                    candidates.add(new CandidateRelation(
-                            mainTable.name(),
-                            mainPrimaryKey,
-                            table.name(),
-                            column.name(),
-                            "ONE_TO_MANY",
-                            column.foreignKey() ? 0.92 : 0.82,
-                            table.name() + "." + column.name() + " 与主表 " + mainTable.name() + "." + mainPrimaryKey + " 命名和键标记匹配。"
-                    ));
-                }
-            }
-
-            String tablePrimaryKey = table.columns().stream()
-                    .filter(ColumnMetadata::primaryKey)
-                    .map(ColumnMetadata::name)
-                    .findFirst()
-                    .orElse("ID");
-            String targetToken = tableRelationToken(table.name());
-            for (ColumnMetadata column : mainTable.columns()) {
-                if (!looksLikeReferenceColumn(column.name())) {
-                    continue;
-                }
-                String columnToken = columnRelationToken(column.name());
-                if (column.foreignKey() || tokenMatches(columnToken, targetToken)) {
-                    candidates.add(new CandidateRelation(
-                            table.name(),
-                            tablePrimaryKey,
-                            mainTable.name(),
-                            column.name(),
-                            "MANY_TO_ONE",
-                            column.foreignKey() ? 0.9 : 0.78,
-                            mainTable.name() + "." + column.name() + " 与 " + table.name() + "." + tablePrimaryKey + " 命名和键标记匹配。"
-                    ));
-                }
-            }
-        }
-        List<CandidateRelation> inferred = enforceDirectedAcyclicRelations(mainTable.name(), dedupe(candidates).stream()
-                .sorted((left, right) -> Double.compare(right.confidence(), left.confidence()))
-                .toList());
-        if (emitter != null) {
-            inferred.forEach(relation -> emitRelation(emitter, relation));
-        }
-        log.info("Local relation inference completed: mainTable={}, relationCount={}", mainTable.name(), inferred.size());
-        emitProgress(emitter, "本地规则推断完成，得到 " + inferred.size() + " 条候选关系。");
-        return inferred;
     }
 
     private List<CandidateRelation> dedupe(List<CandidateRelation> relations) {
@@ -790,30 +707,6 @@ public class AiRelationController {
 
     private static double clampConfidence(double value) {
         return Math.max(0, Math.min(1, value));
-    }
-
-    private static boolean tokenMatches(String left, String right) {
-        return left.equals(right) || left.contains(right) || right.contains(left);
-    }
-
-    private static String tableRelationToken(String value) {
-        return normalizeRelationToken(value)
-                .replaceAll("INFO$", "")
-                .replaceAll("RECORD$", "")
-                .replaceAll("DETAIL$", "")
-                .replaceAll("ITEM$", "");
-    }
-
-    private static String columnRelationToken(String value) {
-        return normalizeRelationToken(value.replaceAll("(?i)_?ID$", ""));
-    }
-
-    private static String normalizeRelationToken(String value) {
-        return nullToBlank(value).replace("_", "").toUpperCase(Locale.ROOT);
-    }
-
-    private static boolean looksLikeReferenceColumn(String value) {
-        return nullToBlank(value).matches("(?i)(^ID$|.*_ID$)");
     }
 
     private static boolean hasText(String value) {
